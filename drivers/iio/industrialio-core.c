@@ -1479,7 +1479,7 @@ static void iio_dev_release(struct device *device)
 	iio_device_unregister_eventset(indio_dev);
 	iio_device_unregister_sysfs(indio_dev);
 
-	iio_buffer_put(indio_dev->buffer);
+	iio_device_buffers_uninit(indio_dev);
 
 	ida_simple_remove(&iio_ida, indio_dev->id);
 	kfree(indio_dev);
@@ -1614,7 +1614,7 @@ void devm_iio_device_free(struct device *dev, struct iio_dev *iio_dev)
 EXPORT_SYMBOL_GPL(devm_iio_device_free);
 
 /**
- * iio_chrdev_open() - chrdev file open for buffer access and ioctls
+ * iio_chrdev_open() - chrdev file open for legacy ioctls
  * @inode:	Inode structure for identifying the device in the file system
  * @filp:	File structure for iio device used to keep and later access
  *		private data
@@ -1637,7 +1637,7 @@ static int iio_chrdev_open(struct inode *inode, struct file *filp)
 }
 
 /**
- * iio_chrdev_release() - chrdev file close buffer access and ioctls
+ * iio_chrdev_release() - chrdev file close for legacy ioctls
  * @inode:	Inode structure pointer for the char device
  * @filp:	File structure pointer for the char device
  *
@@ -1648,59 +1648,40 @@ static int iio_chrdev_release(struct inode *inode, struct file *filp)
 	struct iio_dev *indio_dev = container_of(inode->i_cdev,
 						struct iio_dev, chrdev);
 	clear_bit(IIO_BUSY_BIT_POS, &indio_dev->flags);
-	if (indio_dev->buffer)
-		iio_buffer_free_blocks(indio_dev->buffer);
 	iio_device_put(indio_dev);
 
 	return 0;
 }
 
-/* Somewhat of a cross file organization violation - ioctls here are actually
- * event related */
-static long iio_ioctl(struct file *filp, unsigned int cmd, unsigned long arg)
+long iio_device_legacy_ioctl(struct iio_dev *indio_dev, struct file *filp,
+			     unsigned int cmd, unsigned long arg)
 {
-	struct iio_dev *indio_dev = filp->private_data;
 	int __user *ip = (int __user *)arg;
 	int fd;
 
 	if (!indio_dev->info)
 		return -ENODEV;
 
-	switch (cmd) {
-	case IIO_GET_EVENT_FD_IOCTL:
+	if (cmd == IIO_GET_EVENT_FD_IOCTL) {
 		fd = iio_event_getfd(indio_dev);
 		if (fd < 0)
 			return fd;
 		if (copy_to_user(ip, &fd, sizeof(fd)))
 			return -EFAULT;
 		return 0;
-	default:
-		if (indio_dev->buffer)
-			return iio_buffer_ioctl(indio_dev, filp, cmd, arg);
 	}
 	return -EINVAL;
 }
 
-static const struct file_operations iio_buffer_none_fileops = {
-	.release = iio_chrdev_release,
-	.open = iio_chrdev_open,
-	.owner = THIS_MODULE,
-	.llseek = noop_llseek,
-	.unlocked_ioctl = iio_ioctl,
-	.compat_ioctl = iio_ioctl,
-};
+/* Somewhat of a cross file organization violation - ioctls here are actually
+ * event related */
+static long iio_legacy_ioctl_wrapper(struct file *filp, unsigned int cmd,
+				     unsigned long arg)
+{
+	struct iio_dev *indio_dev = filp->private_data;
 
-static const struct file_operations iio_buffer_in_fileops = {
-	.read = iio_buffer_read_outer_addr,
-	.release = iio_chrdev_release,
-	.open = iio_chrdev_open,
-	.poll = iio_buffer_poll_addr,
-	.owner = THIS_MODULE,
-	.llseek = noop_llseek,
-	.unlocked_ioctl = iio_ioctl,
-	.compat_ioctl = iio_ioctl,
-	.mmap = iio_buffer_mmap,
-};
+	return iio_device_legacy_ioctl(indio_dev, filp, cmd, arg);
+}
 
 static bool iio_chan_same_size(const struct iio_chan_spec *a,
 	const struct iio_chan_spec *b)
@@ -1740,21 +1721,17 @@ static int iio_check_unique_scan_index(struct iio_dev *indio_dev)
 
 static const struct iio_buffer_setup_ops noop_ring_setup_ops;
 
-static const struct file_operations iio_buffer_out_fileops = {
-	.write = iio_buffer_chrdev_write,
+static const struct file_operations iio_legacy_chrdev_fileops = {
 	.release = iio_chrdev_release,
 	.open = iio_chrdev_open,
-	.poll = iio_buffer_poll_addr,
 	.owner = THIS_MODULE,
 	.llseek = noop_llseek,
-	.unlocked_ioctl = iio_ioctl,
-	.compat_ioctl = iio_ioctl,
-	.mmap = iio_buffer_mmap,
+	.unlocked_ioctl = iio_legacy_ioctl_wrapper,
+	.compat_ioctl = iio_legacy_ioctl_wrapper,
 };
 
 int __iio_device_register(struct iio_dev *indio_dev, struct module *this_mod)
 {
-	const struct file_operations *fops;
 	int ret;
 
 	indio_dev->driver_module = this_mod;
@@ -1803,22 +1780,21 @@ int __iio_device_register(struct iio_dev *indio_dev, struct module *this_mod)
 		indio_dev->setup_ops == NULL)
 		indio_dev->setup_ops = &noop_ring_setup_ops;
 
-	if (indio_dev->buffer) {
-		if (indio_dev->direction == IIO_DEVICE_DIRECTION_IN)
-			fops = &iio_buffer_in_fileops;
-		else
-			fops = &iio_buffer_out_fileops;
-	} else {
-		fops = &iio_buffer_none_fileops;
+	ret = iio_device_buffers_init(indio_dev, this_mod);
+	if (ret) {
+		if (ret != -ENOTSUPP)
+			goto error_unreg_eventset;
+
+		cdev_init(&indio_dev->chrdev, &iio_legacy_chrdev_fileops);
+
+		indio_dev->chrdev.owner = this_mod;
+
+		ret = cdev_device_add(&indio_dev->chrdev, &indio_dev->dev);
+		if (ret < 0)
+			goto error_unreg_eventset;
+
+		indio_dev->chrdev_initialized = true;
 	}
-
-	cdev_init(&indio_dev->chrdev, fops);
-
-	indio_dev->chrdev.owner = this_mod;
-
-	ret = cdev_device_add(&indio_dev->chrdev, &indio_dev->dev);
-	if (ret < 0)
-		goto error_unreg_eventset;
 
 	return 0;
 
@@ -1840,7 +1816,10 @@ EXPORT_SYMBOL(__iio_device_register);
  **/
 void iio_device_unregister(struct iio_dev *indio_dev)
 {
-	cdev_device_del(&indio_dev->chrdev, &indio_dev->dev);
+	if (indio_dev->chrdev_initialized)
+		cdev_device_del(&indio_dev->chrdev, &indio_dev->dev);
+
+	indio_dev->chrdev_initialized = false;
 
 	mutex_lock(&indio_dev->info_exist_lock);
 
