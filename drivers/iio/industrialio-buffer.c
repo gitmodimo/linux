@@ -1534,11 +1534,11 @@ static struct attribute *iio_buffer_attrs[] = {
 	&dev_attr_data_available.attr,
 };
 
-int iio_buffer_alloc_sysfs_and_mask(struct iio_dev *indio_dev)
+static int iio_buffer_alloc_sysfs_and_mask(struct iio_buffer *buffer)
 {
+	struct iio_dev *indio_dev = buffer->indio_dev;
 	struct iio_dev_attr *p;
 	struct attribute **attr;
-	struct iio_buffer *buffer = indio_dev->buffer;
 	int ret, i, attrn, attrcount, attrcount_orig = 0;
 	const struct iio_chan_spec *channels;
 
@@ -1641,15 +1641,12 @@ error_cleanup_dynamic:
 	return ret;
 }
 
-void iio_buffer_free_sysfs_and_mask(struct iio_dev *indio_dev)
+static void iio_buffer_free_sysfs_and_mask(struct iio_buffer *buffer)
 {
-	if (!indio_dev->buffer)
-		return;
-
-	iio_buffer_free_scanmask(indio_dev->buffer);
-	kfree(indio_dev->buffer->buffer_group.attrs);
-	kfree(indio_dev->buffer->scan_el_group.attrs);
-	iio_free_chan_devattr_list(&indio_dev->buffer->scan_el_dev_attr_list);
+	iio_buffer_free_scanmask(buffer);
+	kfree(buffer->buffer_group.attrs);
+	kfree(buffer->scan_el_group.attrs);
+	iio_free_chan_devattr_list(&buffer->scan_el_dev_attr_list);
 }
 
 static const struct file_operations iio_buffer_in_fileops = {
@@ -1684,6 +1681,10 @@ int iio_device_buffers_init(struct iio_dev *indio_dev, struct module *this_mod)
 	if (!buffer)
 		return -ENOTSUPP;
 
+	ret = iio_buffer_alloc_sysfs_and_mask(buffer);
+	if (ret)
+		return ret;
+
 	if (indio_dev->direction == IIO_DEVICE_DIRECTION_OUT)
 		cdev_init(&buffer->chrdev, &iio_buffer_out_fileops);
 	else
@@ -1708,6 +1709,7 @@ void iio_device_buffers_uninit(struct iio_dev *indio_dev)
 		return;
 
 	cdev_device_del(&buffer->chrdev, &indio_dev->dev);
+	iio_buffer_free_sysfs_and_mask(buffer);
 	iio_buffer_put(buffer);
 }
 
