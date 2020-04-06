@@ -890,6 +890,7 @@ MODULE_DEVICE_TABLE(of, ad7192_of_match);
 
 static int ad7192_probe(struct spi_device *spi)
 {
+	const struct of_device_id *of_id;
 	struct ad7192_state *st;
 	struct iio_dev *indio_dev;
 	int ret, voltage_uv = 0;
@@ -939,10 +940,12 @@ static int ad7192_probe(struct spi_device *spi)
 		goto error_disable_avdd;
 	}
 
+	of_id = of_match_device(ad7192_of_match, &spi->dev);
+
 	spi_set_drvdata(spi, indio_dev);
-	st->devid = (unsigned long)of_device_get_match_data(&spi->dev);
+	st->devid = (unsigned long)of_id->data;
 	indio_dev->dev.parent = &spi->dev;
-	indio_dev->name = spi_get_device_id(spi)->name;
+	indio_dev->name = of_id->compatible;
 	indio_dev->modes = INDIO_DIRECT_MODE;
 
 	ret = ad7192_channels_config(indio_dev);
