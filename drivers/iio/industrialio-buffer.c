@@ -62,10 +62,6 @@ static bool iio_buffer_ready(struct iio_dev *indio_dev, struct iio_buffer *buf,
 	size_t avail;
 	int flushed = 0;
 
-	/* wakeup if the device was unregistered */
-	if (!indio_dev->info)
-		return true;
-
 	/* drain the buffer if it was disabled */
 	if (!iio_buffer_is_active(buf)) {
 		to_wait = min_t(size_t, to_wait, 1);
@@ -117,9 +113,6 @@ ssize_t iio_buffer_read_outer(struct file *filp, char __user *buf,
 	size_t to_wait;
 	int ret = 0;
 
-	if (!indio_dev->info)
-		return -ENODEV;
-
 	if (!rb || !rb->access->read)
 		return -EINVAL;
 
@@ -139,11 +132,6 @@ ssize_t iio_buffer_read_outer(struct file *filp, char __user *buf,
 
 	add_wait_queue(&rb->pollq, &wait);
 	do {
-		if (!indio_dev->info) {
-			ret = -ENODEV;
-			break;
-		}
-
 		if (!iio_buffer_ready(indio_dev, rb, to_wait, n / datum_size)) {
 			if (signal_pending(current)) {
 				ret = -ERESTARTSYS;
@@ -219,7 +207,7 @@ __poll_t iio_buffer_poll(struct file *filp,
 	struct iio_dev *indio_dev = filp->private_data;
 	struct iio_buffer *rb = indio_dev->buffer;
 
-	if (!indio_dev->info || rb == NULL)
+	if (rb == NULL)
 		return 0;
 
 	poll_wait(filp, &rb->pollq, wait);
@@ -1211,11 +1199,6 @@ int iio_update_buffers(struct iio_dev *indio_dev,
 
 	if (!insert_buffer && !remove_buffer) {
 		ret = 0;
-		goto out_unlock;
-	}
-
-	if (indio_dev->info == NULL) {
-		ret = -ENODEV;
 		goto out_unlock;
 	}
 
